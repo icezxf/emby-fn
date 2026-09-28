@@ -5,34 +5,50 @@ mod handlers;
 
 use axum::{
     body::Body,
+    extract::ConnectInfo,
     http::{Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::signal;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
 use config::Config;
 use handlers::AppState;
 
+static REQ_COUNTER: AtomicU64 = AtomicU64::new(1);
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_target(false)
         .with_level(true)
+        .with_thread_ids(false)
+        .with_thread_names(false)
+        .with_ansi(false) // 容器里更适合关闭 ANSI 颜色
         .init();
 
+    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    info!("🔧 加载配置");
     let cfg = Config::load();
+
     let listen_addr = cfg.listen_addr.clone();
     let emby_url = cfg.emby_url.clone();
     let emby_user = cfg.emby_user_id.clone();
+
+    info!("🔧 初始化 AppState");
     let state = AppState::new(cfg);
 
+    info!("🔧 注册路由");
     let app = Router::new()
         .route("/v/api/v1/login", post(handlers::handle_login))
         .route("/v/api/v1/logout", post(handlers::handle_logout))
@@ -43,63 +59,227 @@ async fn main() {
         .route("/v/api/v1/play/info", post(handlers::handle_play_info))
         .route("/v/api/v1/task/running", get(handlers::handle_task_running))
         .route("/Videos/:guid/stream", get(handlers::handle_video_stream))
+        .route("/Images/:guid", get(handlers::handle_image_proxy))
         .route("/", get(index))
         .fallback(not_found)
         .layer(middleware::from_fn(log_middleware))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(&listen_addr).await.expect("failed to bind address");
-    info!("🚀 飞牛影视 → Emby 协议网关启动");
-    info!("   监听:       {}", listen_addr);
-    info!("   Emby 地址:  {}", emby_url);
-    info!("   Emby User:  {}", emby_user);
-    info!("   飞牛客户端填写: http://<本机IP>:8007");
+    let listener = tokio::net::TcpListener::bind(&listen_addr)
+        .await
+        .expect("failed to bind address");
 
-    axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await.expect("server error");
+    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    info!("🚀 飞牛影视 → Emby 协议网关启动");
+    info!("   监听:        {}", listen_addr);
+    info!("   Emby 地址:   {}", emby_url);
+    info!("   Emby User:   {}", emby_user);
+    info!("   客户端填写:  http://<本机IP>:8007");
+    info!("   日志级别:    RUST_LOG=info|debug|warn");
+    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .expect("server error");
+
     info!("✅ 已关闭");
 }
 
 async fn shutdown_signal() {
-    let ctrl_c = async { signal::ctrl_c().await.expect("install Ctrl+C handler"); };
+    let ctrl_c = async {
+        signal::ctrl_c().await.expect("install Ctrl+C handler");
+    };
     #[cfg(unix)]
     let terminate = async {
         signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler").recv().await;
+            .expect("install SIGTERM handler")
+            .recv()
+            .await;
     };
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
-    tokio::select! { _ = ctrl_c => {}, _ = terminate => {} }
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
     info!("🛑 收到退出信号，正在关闭...");
 }
 
+// ============================================================
+// 日志中间件
+// ============================================================
+
 async fn log_middleware(req: Request<Body>, next: Next) -> Response {
     let start = Instant::now();
+    let req_id = REQ_COUNTER.fetch_add(1, Ordering::Relaxed);
+
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let query = req.uri().query().map(|s| s.to_string());
-    let ua = req.headers().get("user-agent").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let version = req.version();
     let is_video = path.starts_with("/Videos/");
-    if !is_video {
-        info!("➡️  {} {}", method, path);
-        if let Some(q) = &query { info!("    Query: {}", q); }
-        if let Some(ua) = &ua { info!("    UA: {}", truncate(ua, 60)); }
+    let is_image = path.starts_with("/Images/");
+
+    // 请求头
+    let ua = header_str(req.headers(), "user-agent");
+    let auth = header_str(req.headers(), "authorization");
+    let authx = header_str(req.headers(), "authx");
+    let referer = header_str(req.headers(), "referer");
+    let range = header_str(req.headers(), "range");
+    let content_type = header_str(req.headers(), "content-type");
+
+    // 客户端 IP：优先 X-Forwarded-For，其次 ConnectInfo
+    let client_ip = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or("-").trim().to_string())
+        .or_else(|| {
+            req.extensions()
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ci| ci.0.to_string())
+        })
+        .unwrap_or_else(|| "-".into());
+
+    // 请求体（视频和图片不读）
+    let (parts, body) = req.into_parts();
+    let body_bytes = if is_video || is_image {
+        bytes::Bytes::new()
+    } else {
+        axum::body::to_bytes(body, 8192)
+            .await
+            .unwrap_or_else(|_| bytes::Bytes::new())
+    };
+    let body_len = body_bytes.len();
+    let body_preview = if body_len > 0 {
+        Some(truncate(&String::from_utf8_lossy(&body_bytes), 500))
+    } else {
+        None
+    };
+
+    let req = Request::from_parts(parts, Body::from(body_bytes));
+
+    // ---- 请求日志 ----
+    if !is_video && !is_image {
+        info!("");
+        info!("┌─ [req#{}] {} {} {:?}", req_id, method, path, version);
+        info!("│  from        : {}", client_ip);
+        info!("│  user-agent  : {}", ua.as_deref().unwrap_or("-"));
+        if let Some(q) = &query {
+            info!("│  query       : {}", q);
+        }
+        if let Some(ct) = &content_type {
+            info!("│  content-type: {}", ct);
+        }
+        if let Some(a) = &auth {
+            info!("│  authorization: {}", truncate(a, 100));
+        }
+        if let Some(a) = &authx {
+            info!("│  authx       : {}", truncate(a, 120));
+        }
+        if let Some(r) = &referer {
+            info!("│  referer     : {}", truncate(r, 80));
+        }
+        if let Some(b) = &body_preview {
+            info!("│  body ({}B)  : {}", body_len, b);
+        }
     }
+
+    // ---- 执行 ----
     let resp = next.run(req).await;
-    if is_video { info!("🎬 {} {} ({:?})", method, path, start.elapsed()); }
+
+    let status = resp.status().as_u16();
+    let elapsed = start.elapsed();
+
+    // ---- 响应日志 ----
+    if is_video {
+        info!(
+            "🎬 [req#{}] {} {} → {} ({:?}) Range={}",
+            req_id,
+            method,
+            path,
+            status,
+            elapsed,
+            range.as_deref().unwrap_or("-")
+        );
+    } else if is_image {
+        info!(
+            "🖼️  [req#{}] GET Images → {} ({:?})",
+            req_id, status, elapsed
+        );
+    } else {
+        info!("│  → status: {} {} ({:?})", status, reason(status), elapsed);
+        info!("└─ [req#{}] done", req_id);
+    }
+
     resp
 }
 
+fn header_str(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+
 fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n { s.to_string() } else { format!("{}...", &s[..n]) }
+    let s = s.replace('\n', "\\n").replace('\r', "\\r");
+    if s.chars().count() <= n {
+        s
+    } else {
+        let t: String = s.chars().take(n).collect();
+        format!("{}...", t)
+    }
+}
+
+fn reason(code: u16) -> &'static str {
+    match code {
+        200 => "OK",
+        204 => "No Content",
+        206 => "Partial Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        416 => "Range Not Satisfiable",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        504 => "Gateway Timeout",
+        _ => "",
+    }
 }
 
 async fn index() -> impl IntoResponse {
-    (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")], INDEX_HTML)
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        INDEX_HTML,
+    )
 }
 
 async fn not_found(req: Request<Body>) -> impl IntoResponse {
-    tracing::warn!("❓ 未匹配的请求: {} {}", req.method(), req.uri().path());
-    (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "application/json")], r#"{"code":404,"msg":"not found"}"#)
+    let ua = header_str(req.headers(), "user-agent").unwrap_or_else(|| "-".into());
+    let auth = header_str(req.headers(), "authorization").unwrap_or_else(|| "-".into());
+    warn!(
+        "❓ 未匹配路由: {} {}  UA={}  Auth={}",
+        req.method(),
+        req.uri().path(),
+        truncate(&ua, 60),
+        truncate(&auth, 40)
+    );
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        r#"{"code":404,"msg":"not found"}"#,
+    )
 }
 
 const INDEX_HTML: &str = r#"<!DOCTYPE html>
