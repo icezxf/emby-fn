@@ -63,6 +63,8 @@ async fn main() {
         .route("/trimcon", get(sys::handle_trimcon))
         .route("/v/api/v1/sys/version", get(sys::handle_sys_version))
         .route("/v/api/v1/sys/config", get(sys::handle_sys_config))
+        .route("/v/api/v1/sys/init/status", get(sys::handle_sys_init_status))
+        .route("/v/api/v2/sys/init/status", get(sys::handle_sys_init_status))
         .route("/v/api/v2/user/loginByPassword", post(handlers::handle_login_v2))
         .route("/v/api/v1/login", post(handlers::handle_login))
         .route("/v/api/v1/logout", post(handlers::handle_logout))
@@ -326,6 +328,7 @@ a{color:#7cc7ff}
 <a href="/trimcon">/trimcon</a><br><br>
 <a href="/v/api/v1/sys/version?lan=zh-CN">/v/api/v1/sys/version</a><br><br>
 <a href="/v/api/v1/sys/config?lan=zh-CN">/v/api/v1/sys/config</a><br><br>
+<a href="/v/api/v1/sys/init/status">/v/api/v1/sys/init/status</a><br><br>
 <a href="/v/api/v1/mediadb/list">/v/api/v1/mediadb/list</a><br><br>
 <a href="/v/api/v1/item/list?lib_guid=&type=Movie">/v/api/v1/item/list</a>
 </div></div><script>document.getElementById('srv').textContent=location.origin;</script>
