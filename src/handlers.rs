@@ -8,8 +8,9 @@ use axum::{
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::emby::{EmbyClient, EmbyItem};
@@ -17,6 +18,8 @@ use crate::fnos::{
     ItemListData, LoginData, LoginReq, MediaItem, MediaLibrary, MediaSource, PlayInfoData,
     PlayInfoReq, Response as FnosResponse,
 };
+
+const MAX_TOKENS: usize = 1000;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -38,6 +41,30 @@ impl AppState {
             tokens: Arc::new(RwLock::new(HashMap::new())),
         }
     }
+
+    pub async fn add_token(&self, token: String) -> usize {
+        let mut map = self.tokens.write().await;
+        if map.len() >= MAX_TOKENS {
+            let removed = map.len() / 2;
+            let keys: Vec<String> = map.keys().take(removed).cloned().collect();
+            for k in keys {
+                map.remove(&k);
+            }
+            warn!("⚠️  Token 数量超限，清理了 {} 个旧 token", removed);
+        }
+        map.insert(token, self.cfg.emby_user_id.clone());
+        map.len()
+    }
+
+    pub async fn remove_token(&self, token: &str) -> usize {
+        let mut map = self.tokens.write().await;
+        map.remove(token);
+        map.len()
+    }
+
+    pub async fn token_count(&self) -> usize {
+        self.tokens.read().await.len()
+    }
 }
 
 fn json_response<T: serde::Serialize>(v: T) -> Response {
@@ -53,17 +80,23 @@ fn err_response(code: i32, msg: &str) -> Response {
     json_response(FnosResponse::<()>::err(code, msg))
 }
 
+// ============================================================
+// 登录
+// ============================================================
 pub async fn handle_login(State(state): State<AppState>, Json(req): Json<LoginReq>) -> Response {
+    let start = Instant::now();
     let token = format!("fnos-{:016x}", rand::random::<u64>());
-    state
-        .tokens
-        .write()
-        .await
-        .insert(token.clone(), state.cfg.emby_user_id.clone());
+    let total = state.add_token(token.clone()).await;
+
     info!(
-        "🔐 飞牛客户端登录: app_name={}, username={} -> token={}",
-        req.app_name, req.username, token
+        "🔐 [业务] 登录成功: app={:?}, username={:?}, pwd_len={}, token={}, 当前在线 {}",
+        req.app_name,
+        req.username,
+        req.password.len(),
+        token,
+        total
     );
+
     let mut resp = FnosResponse::<LoginData>::ok(LoginData {
         token: token.clone(),
         access_token: token,
@@ -74,14 +107,29 @@ pub async fn handle_login(State(state): State<AppState>, Json(req): Json<LoginRe
         is_admin: 1,
     });
     resp.message = Some("success".into());
+    info!("    ✓ 登录响应已生成 ({:?})", start.elapsed());
     json_response(resp)
 }
 
-pub async fn handle_logout() -> Response {
+pub async fn handle_logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let token = extract_token(&headers);
+    match token {
+        Some(t) => {
+            let left = state.remove_token(&t).await;
+            info!("🚪 [业务] 退出登录: token={}, 剩余 {} 个", t, left);
+        }
+        None => info!("🚪 [业务] 退出登录 (无 token)"),
+    }
     json_response(FnosResponse::<()>::ok(()))
 }
 
+// ============================================================
+// 媒体库列表
+// ============================================================
 pub async fn handle_mediadb_list(State(state): State<AppState>) -> Response {
+    let start = Instant::now();
+    info!("📚 [业务] 请求媒体库列表");
+
     match state.emby.get_libraries().await {
         Ok(libs) => {
             let result: Vec<MediaLibrary> = libs
@@ -99,33 +147,58 @@ pub async fn handle_mediadb_list(State(state): State<AppState>) -> Response {
                     }
                 })
                 .collect();
-            info!("📚 返回媒体库列表: {} 个", result.len());
+
+            for lib in &result {
+                info!("    · [{}] {} ({})", lib.lib_type, lib.title, lib.guid);
+            }
+            info!(
+                "    ✓ 返回 {} 个媒体库, 总耗时 {:?}",
+                result.len(),
+                start.elapsed()
+            );
             json_response(FnosResponse::ok(result))
         }
         Err(e) => {
-            tracing::error!("❌ 获取 Emby 媒体库失败: {}", e);
+            warn!(
+                "    ✗ 获取 Emby 媒体库失败 ({}ms): {}",
+                start.elapsed().as_millis(),
+                e
+            );
             err_response(500, "failed to fetch libraries")
         }
     }
 }
 
+// ============================================================
+// 影片列表
+// ============================================================
 #[derive(Deserialize)]
 pub struct ItemListQuery {
     #[serde(default)]
     pub lib_guid: String,
     #[serde(default, rename = "type")]
     pub item_type: String,
+    #[serde(default)]
+    pub offset: Option<u32>,
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 pub async fn handle_item_list(
     State(state): State<AppState>,
     Query(q): Query<ItemListQuery>,
 ) -> Response {
+    let start = Instant::now();
     let item_types = if q.item_type.is_empty() {
         "Movie"
     } else {
         &q.item_type
     };
+    info!(
+        "🎬 [业务] 请求影片列表: lib={:?}, type={}, offset={:?}, limit={:?}",
+        q.lib_guid, item_types, q.offset, q.limit
+    );
+
     match state.emby.get_items(&q.lib_guid, item_types).await {
         Ok(items) => {
             let list: Vec<MediaItem> = items
@@ -133,11 +206,25 @@ pub async fn handle_item_list(
                 .iter()
                 .map(|item| emby_to_fnos_item(&state.emby, item))
                 .collect();
+
+            for (i, item) in list.iter().take(5).enumerate() {
+                info!(
+                    "    {}. {} ({}) [{}年] 时长{}min 评分{}",
+                    i + 1,
+                    item.title,
+                    item.guid,
+                    item.production_year,
+                    item.runtime,
+                    item.vote_average
+                );
+            }
+            if list.len() > 5 {
+                info!("    ... 还有 {} 条未显示", list.len() - 5);
+            }
             info!(
-                "🎬 返回影片列表: {} 部 (lib={}, type={})",
+                "    ✓ 返回 {} 部影片, 总耗时 {:?}",
                 list.len(),
-                q.lib_guid,
-                item_types
+                start.elapsed()
             );
             json_response(FnosResponse::ok(ItemListData {
                 total: list.len(),
@@ -145,46 +232,97 @@ pub async fn handle_item_list(
             }))
         }
         Err(e) => {
-            tracing::error!("❌ 获取 Emby 影片列表失败: {}", e);
+            warn!(
+                "    ✗ 获取 Emby 影片列表失败 ({}ms): {}",
+                start.elapsed().as_millis(),
+                e
+            );
             err_response(500, "failed to fetch items")
         }
     }
 }
 
+// ============================================================
+// 影片详情
+// ============================================================
 pub async fn handle_item_detail(
     State(state): State<AppState>,
     Path(guid): Path<String>,
 ) -> Response {
+    let start = Instant::now();
+    info!("📽️  [业务] 请求影片详情: guid={}", guid);
+
     match state.emby.get_item(&guid).await {
         Ok(item) => {
-            info!("🎬 返回影片详情: {} ({})", item.name, item.id);
-            json_response(FnosResponse::ok(emby_to_fnos_item(&state.emby, &item)))
+            let f = emby_to_fnos_item(&state.emby, &item);
+            info!("    · 标题:     {}", f.title);
+            info!("    · GUID:     {}", f.guid);
+            info!("    · 类型:     {}", f.item_type);
+            info!("    · 年份:     {}", f.production_year);
+            info!("    · 时长:     {} 分钟", f.runtime);
+            info!("    · 评分:     {}", f.vote_average);
+            info!("    · IMDb:     {}", f.imdb_id);
+            info!("    · 海报:     {}", if f.poster.is_empty() { "(无)" } else { &f.poster });
+            info!("    · 简介:     {}", truncate(&f.overview, 80));
+            info!("    ✓ 完成, 耗时 {:?}", start.elapsed());
+            json_response(FnosResponse::ok(f))
         }
         Err(e) => {
-            tracing::error!("❌ 获取影片详情失败: {}", e);
+            warn!(
+                "    ✗ 获取影片详情失败 ({}ms): {}",
+                start.elapsed().as_millis(),
+                e
+            );
             err_response(404, "item not found")
         }
     }
 }
 
+// ============================================================
+// 播放信息
+// ============================================================
 pub async fn handle_play_info(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    let req: PlayInfoReq = serde_json::from_str(&body).unwrap_or(PlayInfoReq {
-        item_guid: String::new(),
-    });
+    let start = Instant::now();
+
+    info!("▶️  [业务] 请求播放信息");
+    info!("    body: {}", truncate(&body, 300));
+
+    let req: PlayInfoReq = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("    ✗ JSON 解析失败: {}", e);
+            return err_response(400, "invalid json");
+        }
+    };
+
     if req.item_guid.is_empty() {
+        warn!("    ✗ item_guid 为空");
         return err_response(400, "item_guid is required");
     }
+    info!("    item_guid: {}", req.item_guid);
+
+    if let Some(authx) = headers.get("authx").and_then(|v| v.to_str().ok()) {
+        info!("    Authx:         {}", truncate(authx, 100));
+    }
+    if let Some(auth) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+        info!("    Authorization: {}", truncate(auth, 80));
+    }
+    if let Some(ua) = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()) {
+        info!("    User-Agent:    {}", truncate(ua, 80));
+    }
+
     let item = match state.emby.get_item(&req.item_guid).await {
         Ok(i) => i,
         Err(e) => {
-            tracing::error!("❌ 获取播放信息失败: {}", e);
+            warn!("    ✗ 获取影片失败: {}", e);
             return err_response(404, "item not found");
         }
     };
+
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
@@ -200,7 +338,11 @@ pub async fn handle_play_info(
         "http"
     };
     let play_url = format!("{}://{}/Videos/{}/stream", scheme, host, req.item_guid);
-    info!("▶️  返回播放信息: {} -> {}", item.name, play_url);
+
+    info!("    · 影片:     {} ({})", item.name, item.id);
+    info!("    · 播放地址: {}", play_url);
+    info!("    ✓ 完成, 耗时 {:?}", start.elapsed());
+
     json_response(FnosResponse::ok(PlayInfoData {
         url: play_url.clone(),
         protocol: "http".into(),
@@ -212,19 +354,46 @@ pub async fn handle_play_info(
     }))
 }
 
+// ============================================================
+// 视频流
+// ============================================================
 pub async fn handle_video_stream(
     State(state): State<AppState>,
     Path(guid): Path<String>,
 ) -> Response {
     let stream_url = state.emby.get_stream_url(&guid);
-    info!("🎬 视频流重定向: {} -> {}", guid, stream_url);
+    info!("🎥 [业务] 视频流重定向: guid={}", guid);
     Redirect::temporary(&stream_url).into_response()
 }
 
+// ============================================================
+// 图片代理
+// ============================================================
+pub async fn handle_image_proxy(
+    State(state): State<AppState>,
+    Path(guid): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let img_type = headers
+        .get("x-image-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("Primary");
+    let url = state.emby.get_image_url(&guid, img_type);
+    info!("🖼️  [业务] 图片代理: guid={}, type={}", guid, img_type);
+    Redirect::temporary(&url).into_response()
+}
+
+// ============================================================
+// 任务状态
+// ============================================================
 pub async fn handle_task_running() -> Response {
+    info!("⏳ [业务] 请求任务状态");
     json_response(FnosResponse::ok(Vec::<serde_json::Value>::new()))
 }
 
+// ============================================================
+// 工具
+// ============================================================
 fn emby_to_fnos_item(emby: &EmbyClient, item: &EmbyItem) -> MediaItem {
     let runtime = (item.runtime_ticks / 10_000_000) as i32;
     let vote = if item.community_rating > 0.0 {
@@ -243,7 +412,7 @@ fn emby_to_fnos_item(emby: &EmbyClient, item: &EmbyItem) -> MediaItem {
         .image_tags
         .as_ref()
         .and_then(|v| v.get("Primary"))
-        .map(|_| emby.get_image_url(&item.id, "Primary"))
+        .map(|_| format!("/Images/{}", item.id))
         .unwrap_or_default();
     MediaItem {
         guid: item.id.clone(),
@@ -255,5 +424,22 @@ fn emby_to_fnos_item(emby: &EmbyClient, item: &EmbyItem) -> MediaItem {
         poster,
         vote_average: vote,
         imdb_id,
+    }
+}
+
+fn extract_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim_start_matches("Bearer ").to_string())
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    let s = s.replace('\n', "\\n").replace('\r', "\\r");
+    if s.chars().count() <= n {
+        s
+    } else {
+        let t: String = s.chars().take(n).collect();
+        format!("{}...", t)
     }
 }
