@@ -1,12 +1,10 @@
 use axum::{
     body::Body,
-    extract::ConnectInfo,
     http::{header, HeaderMap, StatusCode},
     response::Response,
     Json,
 };
 use serde::Serialize;
-use std::net::SocketAddr;
 use tracing::info;
 
 use crate::fnos::Response as FnosResponse;
@@ -22,7 +20,6 @@ pub struct VersionData {
 }
 
 /// GET /v/api/v1/sys/version?lan=zh-CN
-/// 只返回版本基础信息，不要加 initialized/setup_completed
 pub async fn handle_sys_version() -> Response {
     info!("📡 [业务] 请求系统版本");
 
@@ -48,19 +45,14 @@ pub async fn handle_sys_version() -> Response {
 }
 
 /// GET /v/api/v1/sys/config?lan=zh-CN
-/// 塞入多个候选字段用于探测客户端在哪里拿 WS 地址
-pub async fn handle_sys_config(
-    headers: HeaderMap,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-) -> Response {
+pub async fn handle_sys_config(headers: HeaderMap) -> Response {
     info!("📡 [业务] 请求系统配置");
 
-    // 优先从 Host 头拿，拿不到用请求来源 IP
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("{}:8007", addr.ip()));
+        .unwrap_or("127.0.0.1:8007")
+        .to_string();
 
     let data = serde_json::json!({
         "initialized": true,
@@ -82,7 +74,6 @@ pub async fn handle_sys_config(
             "default_quality": "auto"
         },
 
-        // ---- 候选 WS 地址字段 ----
         "ws_url": format!("ws://{}/websocket", host),
         "websocket": format!("ws://{}/websocket", host),
         "websocket_url": format!("ws://{}/websocket", host),
