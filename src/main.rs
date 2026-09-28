@@ -53,9 +53,16 @@ async fn main() {
     let cfg = Config::load();
 
     let listen_addr = cfg.listen_addr.clone();
-    let extra_addrs = cfg.extra_addrs.clone();
     let emby_url = cfg.emby_url.clone();
     let emby_user = cfg.emby_user_id.clone();
+
+    // 额外监听的端口（硬编码，避免改 config.rs）
+    // 覆盖飞牛客户端的各种端口尝试
+    let extra_addrs: Vec<String> = vec![
+        "0.0.0.0:8005".to_string(),
+        "0.0.0.0:5666".to_string(),
+        "0.0.0.0:5667".to_string(),
+    ];
 
     info!("🔧 初始化 AppState");
     let state = AppState::new(cfg);
@@ -86,7 +93,6 @@ async fn main() {
         .layer(middleware::from_fn(log_middleware))
         .with_state(state);
 
-    // 主监听
     let listener = tokio::net::TcpListener::bind(&listen_addr)
         .await
         .expect("failed to bind address");
@@ -100,7 +106,7 @@ async fn main() {
     info!("   日志级别:    RUST_LOG=info|debug|warn");
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    // 额外端口监听：覆盖飞牛客户端的其他端口尝试
+    // 额外端口监听
     let app_clone = app.clone();
     for addr in extra_addrs {
         let app2 = app_clone.clone();
