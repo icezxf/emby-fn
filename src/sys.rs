@@ -17,8 +17,6 @@ pub struct VersionData {
     pub server_name: String,
     pub api_version: String,
     pub platform: String,
-    pub initialized: bool,
-    pub setup_completed: bool,
 }
 
 #[derive(Serialize)]
@@ -46,17 +44,8 @@ pub struct PlayerConfig {
     pub default_quality: String,
 }
 
-#[derive(Serialize)]
-pub struct InitStatusData {
-    pub initialized: bool,
-    pub setup_completed: bool,
-    pub need_init: bool,
-    pub need_setup: bool,
-    pub has_admin: bool,
-    pub version: String,
-}
-
-/// GET /v/api/v1/sys/version
+/// GET /v/api/v1/sys/version?lan=zh-CN
+/// 只返回版本基础信息，不要加 initialized/setup_completed，会干扰客户端流程
 pub async fn handle_sys_version() -> Response {
     info!("📡 [业务] 请求系统版本");
 
@@ -67,12 +56,12 @@ pub async fn handle_sys_version() -> Response {
         server_name: "fnOS-Mock".into(),
         api_version: "v1".into(),
         platform: "linux".into(),
-        initialized: true,
-        setup_completed: true,
     };
 
-    let body = serde_json::to_string(&FnosResponse::ok(data)).unwrap_or_else(|_| "{}".into());
-    info!("    ✓ 已返回版本 1.0.0 (initialized=true)");
+    let resp = FnosResponse::ok(data);
+    let body = serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into());
+
+    info!("    ✓ 已返回版本 1.0.0");
 
     Response::builder()
         .status(StatusCode::OK)
@@ -81,7 +70,8 @@ pub async fn handle_sys_version() -> Response {
         .unwrap()
 }
 
-/// GET /v/api/v1/sys/config
+/// GET /v/api/v1/sys/config?lan=zh-CN
+/// initialized/setup_completed 只在这里出现
 pub async fn handle_sys_config() -> Response {
     info!("📡 [业务] 请求系统配置");
 
@@ -106,32 +96,10 @@ pub async fn handle_sys_config() -> Response {
         },
     };
 
-    let body = serde_json::to_string(&FnosResponse::ok(data)).unwrap_or_else(|_| "{}".into());
-    info!("    ✓ 已返回系统配置 (initialized=true)");
+    let resp = FnosResponse::ok(data);
+    let body = serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into());
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
-        .body(Body::from(body))
-        .unwrap()
-}
-
-/// GET /v/api/v1/sys/init/status
-/// 客户端可能用它检查服务端是否需要初始化
-pub async fn handle_sys_init_status() -> Response {
-    info!("📡 [业务] 请求初始化状态");
-
-    let data = InitStatusData {
-        initialized: true,
-        setup_completed: true,
-        need_init: false,
-        need_setup: false,
-        has_admin: true,
-        version: "1.0.0".into(),
-    };
-
-    let body = serde_json::to_string(&FnosResponse::ok(data)).unwrap_or_else(|_| "{}".into());
-    info!("    ✓ 已返回初始化状态 (initialized=true)");
+    info!("    ✓ 已返回系统配置");
 
     Response::builder()
         .status(StatusCode::OK)
@@ -148,8 +116,7 @@ pub async fn handle_trimcon() -> Json<serde_json::Value> {
         "msg": "",
         "data": {
             "ok": true,
-            "server": "fnOS-Mock",
-            "initialized": true
+            "server": "fnOS-Mock"
         }
     }))
 }
