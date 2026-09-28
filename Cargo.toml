@@ -13,6 +13,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
 urlencoding = "2.1"
+bytes = "1"
 
 [profile.release]
 opt-level = "z"
