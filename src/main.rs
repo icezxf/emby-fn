@@ -63,6 +63,7 @@ async fn main() {
         .route("/trimcon", get(sys::handle_trimcon))
         .route("/v/api/v1/sys/version", get(sys::handle_sys_version))
         .route("/v/api/v1/sys/config", get(sys::handle_sys_config))
+        .route("/v/api/v2/user/loginByPassword", post(handlers::handle_login_v2))
         .route("/v/api/v1/login", post(handlers::handle_login))
         .route("/v/api/v1/logout", post(handlers::handle_logout))
         .route("/v/api/v1/mediadb/list", get(handlers::handle_mediadb_list))
