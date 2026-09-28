@@ -520,6 +520,39 @@ fn extract_token(headers: &HeaderMap) -> Option<String> {
         .map(|s| s.trim_start_matches("Bearer ").to_string())
 }
 
+// ============================================================
+// 用户信息：GET /v/api/v1/user/info
+// ============================================================
+pub async fn handle_user_info(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    info!("👤 [业务] 请求用户信息");
+
+    let token = extract_token(&headers).unwrap_or_default();
+    info!("    Authorization: {}", truncate(&token, 80));
+
+    let user_id = state.cfg.emby_user_id.clone();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let data = crate::fnos::UserInfoData {
+        user_id: user_id.clone(),
+        user_guid: user_id,
+        username: "fire".into(),
+        user_name: "fire".into(),
+        nickname: "fire".into(),
+        avatar: String::new(),
+        email: String::new(),
+        is_admin: 1,
+        role: "admin".into(),
+        status: 1,
+        created_at: now - 86400 * 30,
+    };
+
+    info!("    ✓ 返回用户信息: fire (admin)");
+    json_response(FnosResponse::ok(data))
+}
+
 fn truncate(s: &str, n: usize) -> String {
     let s = s.replace('\n', "\\n").replace('\r', "\\r");
     if s.chars().count() <= n {
