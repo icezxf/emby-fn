@@ -12,10 +12,20 @@ pub struct Response<T> {
 
 impl<T> Response<T> {
     pub fn ok(data: T) -> Self {
-        Self { code: 0, msg: String::new(), message: None, data: Some(data) }
+        Self {
+            code: 0,
+            msg: String::new(),
+            message: None,
+            data: Some(data),
+        }
     }
     pub fn err(code: i32, msg: &str) -> Response<()> {
-        Response { code, msg: msg.to_string(), message: None, data: None }
+        Response {
+            code,
+            msg: msg.to_string(),
+            message: None,
+            data: None,
+        }
     }
 }
 
@@ -28,6 +38,10 @@ pub struct LoginData {
     pub username: String,
     pub user_name: String,
     pub is_admin: i32,
+    pub secret: String,
+    pub expire: i64,
+    pub expire_time: i64,
+    pub refresh_token: String,
 }
 
 #[derive(Serialize)]
@@ -86,19 +100,4 @@ pub struct LoginReq {
 pub struct PlayInfoReq {
     #[serde(default)]
     pub item_guid: String,
-}
-
-#[derive(Serialize)]
-pub struct UserInfoData {
-    pub user_id: String,
-    pub user_guid: String,
-    pub username: String,
-    pub user_name: String,
-    pub nickname: String,
-    pub avatar: String,
-    pub email: String,
-    pub is_admin: i32,
-    pub role: String,
-    pub status: i32,
-    pub created_at: i64,
 }
