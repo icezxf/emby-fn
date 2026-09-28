@@ -51,7 +51,7 @@ impl EmbyClient {
             "🔧 EmbyClient 初始化: base_url={}, user_id={}, api_key={}",
             base_url,
             user_id,
-            mask_key(&api_key)
+            mask_bare_key(&api_key)
         );
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -116,7 +116,6 @@ impl EmbyClient {
         url
     }
 
-    /// 通用 GET JSON，带完整日志
     async fn get_json(&self, url: &str) -> Result<EmbyItemsResponse, String> {
         let start = Instant::now();
         let masked = mask_key(url);
@@ -168,10 +167,9 @@ impl EmbyClient {
             truncate(&body, 400)
         );
 
-        // 先尝试 Items 响应
         if let Ok(list) = serde_json::from_str::<EmbyItemsResponse>(&body) {
             if !list.items.is_empty() {
-                info!(
+                debug!(
                     "    ✓ 解析到 {} 个条目 (总数 {}), 耗时 {}ms",
                     list.items.len(),
                     list.total,
@@ -181,10 +179,9 @@ impl EmbyClient {
             }
         }
 
-        // 再尝试单个 Item
         if let Ok(single) = serde_json::from_str::<EmbyItem>(&body) {
             if !single.id.is_empty() {
-                info!(
+                debug!(
                     "    ✓ 解析到单个条目: {} ({}), 耗时 {}ms",
                     single.name, single.id, elapsed
                 );
@@ -208,7 +205,7 @@ impl EmbyClient {
     }
 }
 
-/// 把 api_key=xxx 替换成 api_key=***，避免日志泄露
+/// 把 URL 里的 api_key=xxx 替换成 api_key=***
 fn mask_key(s: &str) -> String {
     if let Some(pos) = s.find("api_key=") {
         let (head, tail) = s.split_at(pos + 8);
@@ -217,6 +214,20 @@ fn mask_key(s: &str) -> String {
         format!("{}***{}", head, rest)
     } else {
         s.to_string()
+    }
+}
+
+/// 掩码裸 API Key，保留前 4 后 4 字符
+fn mask_bare_key(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= 8 {
+        "***".into()
+    } else {
+        format!(
+            "{}***{}",
+            chars[..4].iter().collect::<String>(),
+            chars[chars.len() - 4..].iter().collect::<String>()
+        )
     }
 }
 
