@@ -2,6 +2,7 @@ mod config;
 mod emby;
 mod fnos;
 mod handlers;
+mod sys;
 
 use axum::{
     body::Body,
@@ -23,6 +24,15 @@ use config::Config;
 use handlers::AppState;
 
 static REQ_COUNTER: AtomicU64 = AtomicU64::new(1);
+static VIDEO_COUNTER: AtomicU64 = AtomicU64::new(0);
+static IMAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
 
 #[tokio::main]
 async fn main() {
@@ -34,7 +44,7 @@ async fn main() {
         .with_level(true)
         .with_thread_ids(false)
         .with_thread_names(false)
-        .with_ansi(false) // 容器里更适合关闭 ANSI 颜色
+        .with_ansi(false)
         .init();
 
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -50,6 +60,8 @@ async fn main() {
 
     info!("🔧 注册路由");
     let app = Router::new()
+        .route("/trimcon", get(sys::handle_trimcon))
+        .route("/v/api/v1/sys/version", get(sys::handle_sys_version))
         .route("/v/api/v1/login", post(handlers::handle_login))
         .route("/v/api/v1/logout", post(handlers::handle_logout))
         .route("/v/api/v1/mediadb/list", get(handlers::handle_mediadb_list))
@@ -124,7 +136,6 @@ async fn log_middleware(req: Request<Body>, next: Next) -> Response {
     let is_video = path.starts_with("/Videos/");
     let is_image = path.starts_with("/Images/");
 
-    // 请求头
     let ua = header_str(req.headers(), "user-agent");
     let auth = header_str(req.headers(), "authorization");
     let authx = header_str(req.headers(), "authx");
@@ -132,7 +143,6 @@ async fn log_middleware(req: Request<Body>, next: Next) -> Response {
     let range = header_str(req.headers(), "range");
     let content_type = header_str(req.headers(), "content-type");
 
-    // 客户端 IP：优先 X-Forwarded-For，其次 ConnectInfo
     let client_ip = req
         .headers()
         .get("x-forwarded-for")
@@ -145,7 +155,6 @@ async fn log_middleware(req: Request<Body>, next: Next) -> Response {
         })
         .unwrap_or_else(|| "-".into());
 
-    // 请求体（视频和图片不读）
     let (parts, body) = req.into_parts();
     let body_bytes = if is_video || is_image {
         bytes::Bytes::new()
@@ -163,8 +172,18 @@ async fn log_middleware(req: Request<Body>, next: Next) -> Response {
 
     let req = Request::from_parts(parts, Body::from(body_bytes));
 
-    // ---- 请求日志 ----
-    if !is_video && !is_image {
+    let video_sample = env_u64("VIDEO_LOG_SAMPLE", 100).max(1);
+    let image_sample = env_u64("IMAGE_LOG_SAMPLE", 50).max(1);
+
+    let log_request = if is_video {
+        VIDEO_COUNTER.fetch_add(1, Ordering::Relaxed) % video_sample == 0
+    } else if is_image {
+        IMAGE_COUNTER.fetch_add(1, Ordering::Relaxed) % image_sample == 0
+    } else {
+        true
+    };
+
+    if log_request && !is_image {
         info!("");
         info!("┌─ [req#{}] {} {} {:?}", req_id, method, path, version);
         info!("│  from        : {}", client_ip);
@@ -189,28 +208,27 @@ async fn log_middleware(req: Request<Body>, next: Next) -> Response {
         }
     }
 
-    // ---- 执行 ----
     let resp = next.run(req).await;
 
     let status = resp.status().as_u16();
     let elapsed = start.elapsed();
 
-    // ---- 响应日志 ----
     if is_video {
-        info!(
-            "🎬 [req#{}] {} {} → {} ({:?}) Range={}",
-            req_id,
-            method,
-            path,
-            status,
-            elapsed,
-            range.as_deref().unwrap_or("-")
-        );
+        if log_request {
+            info!(
+                "🎬 [req#{}] {} {} → {} ({:?}) Range={}",
+                req_id,
+                method,
+                path,
+                status,
+                elapsed,
+                range.as_deref().unwrap_or("-")
+            );
+        }
     } else if is_image {
-        info!(
-            "🖼️  [req#{}] GET Images → {} ({:?})",
-            req_id, status, elapsed
-        );
+        if log_request {
+            info!("🖼️  [req#{}] Images → {} ({:?})", req_id, status, elapsed);
+        }
     } else {
         info!("│  → status: {} {} ({:?})", status, reason(status), elapsed);
         info!("└─ [req#{}] done", req_id);
@@ -307,6 +325,8 @@ a{color:#7cc7ff}
 <tr><td style="color:#8a90a0;padding:6px 0;">账号</td><td><code>admin</code>（任意密码）</td></tr>
 </table></div>
 <div class="card"><h2>自测</h2>
+<a href="/trimcon">/trimcon</a><br><br>
+<a href="/v/api/v1/sys/version?lan=zh-CN">/v/api/v1/sys/version</a><br><br>
 <a href="/v/api/v1/mediadb/list">/v/api/v1/mediadb/list</a><br><br>
 <a href="/v/api/v1/item/list?lib_guid=&type=Movie">/v/api/v1/item/list</a>
 </div></div><script>document.getElementById('srv').textContent=location.origin;</script>
