@@ -87,3 +87,18 @@ pub struct PlayInfoReq {
     #[serde(default)]
     pub item_guid: String,
 }
+
+#[derive(Serialize)]
+pub struct UserInfoData {
+    pub user_id: String,
+    pub user_guid: String,
+    pub username: String,
+    pub user_name: String,
+    pub nickname: String,
+    pub avatar: String,
+    pub email: String,
+    pub is_admin: i32,
+    pub role: String,
+    pub status: i32,
+    pub created_at: i64,
+}
