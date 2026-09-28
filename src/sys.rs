@@ -19,8 +19,28 @@ pub struct VersionData {
     pub platform: String,
 }
 
+#[derive(Serialize)]
+pub struct SysConfigData {
+    pub transcode_enabled: bool,
+    pub subtitle_enabled: bool,
+    pub danmaku_enabled: bool,
+    pub download_enabled: bool,
+    pub upload_enabled: bool,
+    pub allow_register: bool,
+    pub upload_max_size: u64,
+    pub theme: String,
+    pub default_language: String,
+    pub player: PlayerConfig,
+}
+
+#[derive(Serialize)]
+pub struct PlayerConfig {
+    pub hardware_decode: bool,
+    pub auto_play: bool,
+    pub default_quality: String,
+}
+
 /// GET /v/api/v1/sys/version?lan=zh-CN
-/// 飞牛客户端启动后第一个真正打签名的接口，用来确认服务端版本
 pub async fn handle_sys_version() -> Response {
     info!("📡 [业务] 请求系统版本");
 
@@ -45,8 +65,40 @@ pub async fn handle_sys_version() -> Response {
         .unwrap()
 }
 
+/// GET /v/api/v1/sys/config?lan=zh-CN
+pub async fn handle_sys_config() -> Response {
+    info!("📡 [业务] 请求系统配置");
+
+    let data = SysConfigData {
+        transcode_enabled: true,
+        subtitle_enabled: true,
+        danmaku_enabled: false,
+        download_enabled: true,
+        upload_enabled: false,
+        allow_register: false,
+        upload_max_size: 10 * 1024 * 1024 * 1024,
+        theme: "dark".into(),
+        default_language: "zh-CN".into(),
+        player: PlayerConfig {
+            hardware_decode: true,
+            auto_play: true,
+            default_quality: "auto".into(),
+        },
+    };
+
+    let resp = FnosResponse::ok(data);
+    let body = serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into());
+
+    info!("    ✓ 已返回系统配置");
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+        .body(Body::from(body))
+        .unwrap()
+}
+
 /// GET /trimcon
-/// 客户端用这个接口探测服务端是否可连通，返回任意成功即可
 pub async fn handle_trimcon() -> Json<serde_json::Value> {
     info!("📡 [业务] 连接探测 /trimcon");
     Json(serde_json::json!({
