@@ -135,6 +135,11 @@ pub async fn handle_login_v2(
 ) -> Response {
     let start = Instant::now();
     let token = format!("fnos-{:016x}", rand::random::<u64>());
+    let secret = format!(
+        "{:016x}{:016x}",
+        rand::random::<u64>(),
+        rand::random::<u64>()
+    );
     let total = state.add_token(token.clone()).await;
 
     info!(
@@ -153,15 +158,37 @@ pub async fn handle_login_v2(
         req.username.clone()
     };
 
-    let mut resp = FnosResponse::<LoginData>::ok(LoginData {
-        token: token.clone(),
-        access_token: token,
-        user_id: state.cfg.emby_user_id.clone(),
-        user_guid: state.cfg.emby_user_id.clone(),
-        username: user_name.clone(),
-        user_name,
-        is_admin: 1,
+    let data = serde_json::json!({
+        "token": token,
+        "access_token": token,
+        "secret": secret,
+        "secret_string": secret,
+        "user_id": state.cfg.emby_user_id,
+        "user_guid": state.cfg.emby_user_id,
+        "username": user_name,
+        "user_name": user_name,
+        "nickname": user_name,
+        "is_admin": 1,
+        "is_admin_user": 1,
+        "role": "admin",
+        "status": 1,
+        "initialized": true,
+        "avatar": "",
+        "email": "",
+        "created_at": "2026-01-01T00:00:00Z",
+        "last_login": "2026-01-01T00:00:00Z",
+        "user": {
+            "id": state.cfg.emby_user_id,
+            "guid": state.cfg.emby_user_id,
+            "username": user_name,
+            "nickname": user_name,
+            "is_admin": 1,
+            "role": "admin",
+            "status": 1
+        }
     });
+
+    let mut resp = FnosResponse::ok(data);
     resp.message = Some("success".into());
     info!("    ✓ v2 登录响应已生成 ({:?})", start.elapsed());
     json_response(resp)
