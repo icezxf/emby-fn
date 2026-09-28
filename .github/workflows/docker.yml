@@ -42,8 +42,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -68,4 +67,4 @@ jobs:
           sbom: true
 
       - name: Image digest
-        run: echo "✅ Image pushed: ${{ steps.meta.outputs.tags }}"
+        run: echo "Image pushed: ${{ steps.meta.outputs.tags }}"
