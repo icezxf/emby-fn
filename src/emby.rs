@@ -1,5 +1,7 @@
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::Instant;
+use tracing::{debug, info, warn};
 
 #[derive(Clone)]
 pub struct EmbyClient {
@@ -45,6 +47,12 @@ impl EmbyClient {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("failed to build reqwest client");
+        info!(
+            "🔧 EmbyClient 初始化: base_url={}, user_id={}, api_key={}",
+            base_url,
+            user_id,
+            mask_key(&api_key)
+        );
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
@@ -55,53 +63,169 @@ impl EmbyClient {
 
     pub async fn get_libraries(&self) -> Result<EmbyItemsResponse, String> {
         let url = format!("{}/Users/{}/Views", self.base_url, self.user_id);
+        info!("🌐 [Emby] GET Views (媒体库列表)");
         self.get_json(&url).await
     }
 
-    pub async fn get_items(&self, parent_id: &str, item_types: &str) -> Result<EmbyItemsResponse, String> {
+    pub async fn get_items(
+        &self,
+        parent_id: &str,
+        item_types: &str,
+    ) -> Result<EmbyItemsResponse, String> {
         let url = format!(
             "{}/Users/{}/Items?ParentId={}&Recursive=true&IncludeItemTypes={}&Fields=Overview,ProductionYear,RunTimeTicks,CommunityRating,ProviderIds,ImageTags&SortBy=SortName&SortOrder=Ascending",
-            self.base_url, self.user_id,
+            self.base_url,
+            self.user_id,
             urlencoding::encode(parent_id),
             urlencoding::encode(item_types),
+        );
+        info!(
+            "🌐 [Emby] GET Items (parent={}, types={})",
+            parent_id, item_types
         );
         self.get_json(&url).await
     }
 
     pub async fn get_item(&self, item_id: &str) -> Result<EmbyItem, String> {
         let url = format!("{}/Users/{}/Items/{}", self.base_url, self.user_id, item_id);
+        info!("🌐 [Emby] GET Item detail (id={})", item_id);
         let resp: EmbyItemsResponse = self.get_json(&url).await?;
-        resp.items.into_iter().next().ok_or_else(|| "item not found".to_string())
+        resp.items
+            .into_iter()
+            .next()
+            .ok_or_else(|| "item not found".to_string())
     }
 
     pub fn get_image_url(&self, item_id: &str, image_type: &str) -> String {
-        format!("{}/Items/{}/Images/{}?maxWidth=500&tag=1", self.base_url, item_id, image_type)
+        format!(
+            "{}/Items/{}/Images/{}?maxWidth=500&tag=1",
+            self.base_url, item_id, image_type
+        )
     }
 
     pub fn get_stream_url(&self, item_id: &str) -> String {
-        format!("{}/Videos/{}/stream?Static=true&api_key={}", self.base_url, item_id, self.api_key)
+        let url = format!(
+            "{}/Videos/{}/stream?Static=true&api_key={}",
+            self.base_url, item_id, self.api_key
+        );
+        info!(
+            "🎬 [Emby] 生成流地址: item_id={}, url={}",
+            item_id,
+            mask_key(&url)
+        );
+        url
     }
 
+    /// 通用 GET JSON，带完整日志
     async fn get_json(&self, url: &str) -> Result<EmbyItemsResponse, String> {
-        let resp = self.http.get(url)
+        let start = Instant::now();
+        let masked = mask_key(url);
+        debug!("    → 请求 URL: {}", masked);
+
+        let resp = match self
+            .http
+            .get(url)
             .header("X-Emby-Token", &self.api_key)
-            .send().await
-            .map_err(|e| format!("request error: {}", e))?;
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(
+                    "    ✗ Emby 请求失败 ({}ms): {}",
+                    start.elapsed().as_millis(),
+                    e
+                );
+                return Err(format!("request error: {}", e));
+            }
+        };
+
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| format!("read body error: {}", e))?;
+        let body = match resp.text().await {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("    ✗ 读取响应体失败: {}", e);
+                return Err(format!("read body error: {}", e));
+            }
+        };
+        let elapsed = start.elapsed().as_millis();
+        let body_len = body.len();
+
         if !status.is_success() {
+            warn!(
+                "    ✗ Emby 返回错误 ({}ms): HTTP {} — {}",
+                elapsed,
+                status,
+                truncate(&body, 300)
+            );
             return Err(format!("emby api error: {} {}", status, body));
         }
+
+        debug!(
+            "    ← Emby 响应 ({}ms, {}B): {}",
+            elapsed,
+            body_len,
+            truncate(&body, 400)
+        );
+
+        // 先尝试 Items 响应
         if let Ok(list) = serde_json::from_str::<EmbyItemsResponse>(&body) {
             if !list.items.is_empty() {
+                info!(
+                    "    ✓ 解析到 {} 个条目 (总数 {}), 耗时 {}ms",
+                    list.items.len(),
+                    list.total,
+                    elapsed
+                );
                 return Ok(list);
             }
         }
+
+        // 再尝试单个 Item
         if let Ok(single) = serde_json::from_str::<EmbyItem>(&body) {
             if !single.id.is_empty() {
-                return Ok(EmbyItemsResponse { items: vec![single], total: 1 });
+                info!(
+                    "    ✓ 解析到单个条目: {} ({}), 耗时 {}ms",
+                    single.name, single.id, elapsed
+                );
+                return Ok(EmbyItemsResponse {
+                    items: vec![single],
+                    total: 1,
+                });
             }
         }
-        Ok(EmbyItemsResponse { items: vec![], total: 0 })
+
+        warn!(
+            "    ⚠ Emby 返回无法解析为空结果 ({}ms, {}B): {}",
+            elapsed,
+            body_len,
+            truncate(&body, 200)
+        );
+        Ok(EmbyItemsResponse {
+            items: vec![],
+            total: 0,
+        })
+    }
+}
+
+/// 把 api_key=xxx 替换成 api_key=***，避免日志泄露
+fn mask_key(s: &str) -> String {
+    if let Some(pos) = s.find("api_key=") {
+        let (head, tail) = s.split_at(pos + 8);
+        let end = tail.find('&').unwrap_or(tail.len());
+        let (_, rest) = tail.split_at(end);
+        format!("{}***{}", head, rest)
+    } else {
+        s.to_string()
+    }
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    let s = s.replace('\n', " ").replace('\r', " ");
+    if s.chars().count() <= n {
+        s
+    } else {
+        let t: String = s.chars().take(n).collect();
+        format!("{}...", t)
     }
 }
