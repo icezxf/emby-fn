@@ -81,7 +81,7 @@ fn err_response(code: i32, msg: &str) -> Response {
 }
 
 // ============================================================
-// 登录
+// v1 登录（老客户端）
 // ============================================================
 pub async fn handle_login(State(state): State<AppState>, Json(req): Json<LoginReq>) -> Response {
     let start = Instant::now();
@@ -89,7 +89,7 @@ pub async fn handle_login(State(state): State<AppState>, Json(req): Json<LoginRe
     let total = state.add_token(token.clone()).await;
 
     info!(
-        "🔐 [业务] 登录成功: app={:?}, username={:?}, pwd_len={}, token={}, 当前在线 {}",
+        "🔐 [业务] v1 登录成功: app={:?}, username={:?}, pwd_len={}, token={}, 当前在线 {}",
         req.app_name,
         req.username,
         req.password.len(),
@@ -107,7 +107,63 @@ pub async fn handle_login(State(state): State<AppState>, Json(req): Json<LoginRe
         is_admin: 1,
     });
     resp.message = Some("success".into());
-    info!("    ✓ 登录响应已生成 ({:?})", start.elapsed());
+    info!("    ✓ v1 登录响应已生成 ({:?})", start.elapsed());
+    json_response(resp)
+}
+
+// ============================================================
+// v2 登录：POST /v/api/v2/user/loginByPassword
+// 新版客户端走这里，密码是 SHA256 哈希
+// ============================================================
+#[derive(Deserialize)]
+pub struct LoginV2Req {
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+    #[serde(default)]
+    pub device: String,
+    #[serde(default)]
+    pub app_name: String,
+    #[serde(default)]
+    pub lan: String,
+}
+
+pub async fn handle_login_v2(
+    State(state): State<AppState>,
+    Json(req): Json<LoginV2Req>,
+) -> Response {
+    let start = Instant::now();
+    let token = format!("fnos-{:016x}", rand::random::<u64>());
+    let total = state.add_token(token.clone()).await;
+
+    info!(
+        "🔐 [业务] v2 登录成功: app={:?}, device={:?}, username={:?}, pwd_len={}, token={}, 当前在线 {}",
+        req.app_name,
+        req.device,
+        req.username,
+        req.password.len(),
+        token,
+        total
+    );
+
+    let user_name = if req.username.is_empty() {
+        "admin".to_string()
+    } else {
+        req.username.clone()
+    };
+
+    let mut resp = FnosResponse::<LoginData>::ok(LoginData {
+        token: token.clone(),
+        access_token: token,
+        user_id: state.cfg.emby_user_id.clone(),
+        user_guid: state.cfg.emby_user_id.clone(),
+        username: user_name.clone(),
+        user_name,
+        is_admin: 1,
+    });
+    resp.message = Some("success".into());
+    info!("    ✓ v2 登录响应已生成 ({:?})", start.elapsed());
     json_response(resp)
 }
 
@@ -262,7 +318,10 @@ pub async fn handle_item_detail(
             info!("    · 时长:     {} 分钟", f.runtime);
             info!("    · 评分:     {}", f.vote_average);
             info!("    · IMDb:     {}", f.imdb_id);
-            info!("    · 海报:     {}", if f.poster.is_empty() { "(无)" } else { &f.poster });
+            info!(
+                "    · 海报:     {}",
+                if f.poster.is_empty() { "(无)" } else { &f.poster }
+            );
             info!("    · 简介:     {}", truncate(&f.overview, 80));
             info!("    ✓ 完成, 耗时 {:?}", start.elapsed());
             json_response(FnosResponse::ok(f))
