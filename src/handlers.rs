@@ -97,14 +97,25 @@ pub async fn handle_login(State(state): State<AppState>, Json(req): Json<LoginRe
         total
     );
 
+    let secret = format!("{:032x}", rand::random::<u128>());
+    let expire = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 86400 * 30) as i64;
+
     let mut resp = FnosResponse::<LoginData>::ok(LoginData {
         token: token.clone(),
-        access_token: token,
+        access_token: token.clone(),
         user_id: state.cfg.emby_user_id.clone(),
         user_guid: state.cfg.emby_user_id.clone(),
         username: "admin".into(),
         user_name: "admin".into(),
         is_admin: 1,
+        secret,
+        expire,
+        expire_time: expire,
+        refresh_token: token,
     });
     resp.message = Some("success".into());
     info!("    ✓ v1 登录响应已生成 ({:?})", start.elapsed());
@@ -113,7 +124,6 @@ pub async fn handle_login(State(state): State<AppState>, Json(req): Json<LoginRe
 
 // ============================================================
 // v2 登录：POST /v/api/v2/user/loginByPassword
-// 新版客户端走这里，密码是 SHA256 哈希
 // ============================================================
 #[derive(Deserialize)]
 pub struct LoginV2Req {
@@ -135,11 +145,6 @@ pub async fn handle_login_v2(
 ) -> Response {
     let start = Instant::now();
     let token = format!("fnos-{:016x}", rand::random::<u64>());
-    let secret = format!(
-        "{:016x}{:016x}",
-        rand::random::<u64>(),
-        rand::random::<u64>()
-    );
     let total = state.add_token(token.clone()).await;
 
     info!(
@@ -158,37 +163,26 @@ pub async fn handle_login_v2(
         req.username.clone()
     };
 
-    let data = serde_json::json!({
-        "token": token,
-        "access_token": token,
-        "secret": secret,
-        "secret_string": secret,
-        "user_id": state.cfg.emby_user_id,
-        "user_guid": state.cfg.emby_user_id,
-        "username": user_name,
-        "user_name": user_name,
-        "nickname": user_name,
-        "is_admin": 1,
-        "is_admin_user": 1,
-        "role": "admin",
-        "status": 1,
-        "initialized": true,
-        "avatar": "",
-        "email": "",
-        "created_at": "2026-01-01T00:00:00Z",
-        "last_login": "2026-01-01T00:00:00Z",
-        "user": {
-            "id": state.cfg.emby_user_id,
-            "guid": state.cfg.emby_user_id,
-            "username": user_name,
-            "nickname": user_name,
-            "is_admin": 1,
-            "role": "admin",
-            "status": 1
-        }
-    });
+    let secret = format!("{:032x}", rand::random::<u128>());
+    let expire = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 86400 * 30) as i64;
 
-    let mut resp = FnosResponse::ok(data);
+    let mut resp = FnosResponse::<LoginData>::ok(LoginData {
+        token: token.clone(),
+        access_token: token.clone(),
+        user_id: state.cfg.emby_user_id.clone(),
+        user_guid: state.cfg.emby_user_id.clone(),
+        username: user_name.clone(),
+        user_name,
+        is_admin: 1,
+        secret,
+        expire,
+        expire_time: expire,
+        refresh_token: token,
+    });
     resp.message = Some("success".into());
     info!("    ✓ v2 登录响应已生成 ({:?})", start.elapsed());
     json_response(resp)
@@ -204,6 +198,57 @@ pub async fn handle_logout(State(state): State<AppState>, headers: HeaderMap) ->
         None => info!("🚪 [业务] 退出登录 (无 token)"),
     }
     json_response(FnosResponse::<()>::ok(()))
+}
+
+// ============================================================
+// 用户信息：GET /v/api/v1/user/info
+// 客户端登录后会请求这个接口，也是它拿 WS 地址的关键点
+// 这里塞了多种候选字段，方便探测客户端真正需要什么
+// ============================================================
+pub async fn handle_user_info(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    info!("👤 [业务] 请求用户信息");
+
+    let token = extract_token(&headers).unwrap_or_default();
+    info!("    Authorization: {}", truncate(&token, 80));
+
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("127.0.0.1:8007");
+
+    let user_id = state.cfg.emby_user_id.clone();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let data = serde_json::json!({
+        "user_id": user_id,
+        "user_guid": user_id,
+        "username": "fire",
+        "user_name": "fire",
+        "nickname": "fire",
+        "avatar": "",
+        "email": "",
+        "is_admin": 1,
+        "role": "admin",
+        "status": 1,
+        "created_at": now - 86400 * 30,
+
+        // ---- 下面全是候选字段，用于探测客户端从哪儿拿 WS 地址 ----
+        "ws_url": format!("ws://{}/websocket", host),
+        "websocket": format!("ws://{}/websocket", host),
+        "websocket_url": format!("ws://{}/websocket", host),
+        "ws": format!("ws://{}/websocket", host),
+        "server_url": format!("http://{}", host),
+        "server": format!("http://{}", host),
+        "websocket_port": 8007,
+        "ws_port": 8007,
+        "port": 8007,
+    });
+
+    info!("    ✓ 返回用户信息: fire (admin)");
+    json_response(FnosResponse::ok(data))
 }
 
 // ============================================================
@@ -518,39 +563,6 @@ fn extract_token(headers: &HeaderMap) -> Option<String> {
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim_start_matches("Bearer ").to_string())
-}
-
-// ============================================================
-// 用户信息：GET /v/api/v1/user/info
-// ============================================================
-pub async fn handle_user_info(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    info!("👤 [业务] 请求用户信息");
-
-    let token = extract_token(&headers).unwrap_or_default();
-    info!("    Authorization: {}", truncate(&token, 80));
-
-    let user_id = state.cfg.emby_user_id.clone();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-
-    let data = crate::fnos::UserInfoData {
-        user_id: user_id.clone(),
-        user_guid: user_id,
-        username: "fire".into(),
-        user_name: "fire".into(),
-        nickname: "fire".into(),
-        avatar: String::new(),
-        email: String::new(),
-        is_admin: 1,
-        role: "admin".into(),
-        status: 1,
-        created_at: now - 86400 * 30,
-    };
-
-    info!("    ✓ 返回用户信息: fire (admin)");
-    json_response(FnosResponse::ok(data))
 }
 
 fn truncate(s: &str, n: usize) -> String {
