@@ -3,6 +3,7 @@ mod emby;
 mod fnos;
 mod handlers;
 mod sys;
+mod ws;
 
 use axum::{
     body::Body,
@@ -60,12 +61,15 @@ async fn main() {
 
     info!("🔧 注册路由");
     let app = Router::new()
+        .route("/websocket", get(ws::handle_websocket))
+        .route("/ws", get(ws::handle_websocket))
         .route("/trimcon", get(sys::handle_trimcon))
         .route("/v/api/v1/sys/version", get(sys::handle_sys_version))
         .route("/v/api/v1/sys/config", get(sys::handle_sys_config))
-        .route("/v/api/v1/sys/init/status", get(sys::handle_sys_init_status))
-        .route("/v/api/v2/sys/init/status", get(sys::handle_sys_init_status))
-        .route("/v/api/v2/user/loginByPassword", post(handlers::handle_login_v2))
+        .route(
+            "/v/api/v2/user/loginByPassword",
+            post(handlers::handle_login_v2),
+        )
         .route("/v/api/v1/login", post(handlers::handle_login))
         .route("/v/api/v1/logout", post(handlers::handle_logout))
         .route("/v/api/v1/user/info", get(handlers::handle_user_info))
@@ -74,7 +78,10 @@ async fn main() {
         .route("/v/api/v1/item/list", get(handlers::handle_item_list))
         .route("/v/api/v1/item/:guid", get(handlers::handle_item_detail))
         .route("/v/api/v1/play/info", post(handlers::handle_play_info))
-        .route("/v/api/v1/task/running", get(handlers::handle_task_running))
+        .route(
+            "/v/api/v1/task/running",
+            get(handlers::handle_task_running),
+        )
         .route("/Videos/:guid/stream", get(handlers::handle_video_stream))
         .route("/Images/:guid", get(handlers::handle_image_proxy))
         .route("/", get(index))
@@ -126,6 +133,10 @@ async fn shutdown_signal() {
     info!("🛑 收到退出信号，正在关闭...");
 }
 
+// ============================================================
+// 日志中间件
+// ============================================================
+
 async fn log_middleware(req: Request<Body>, next: Next) -> Response {
     let start = Instant::now();
     let req_id = REQ_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -136,6 +147,7 @@ async fn log_middleware(req: Request<Body>, next: Next) -> Response {
     let version = req.version();
     let is_video = path.starts_with("/Videos/");
     let is_image = path.starts_with("/Images/");
+    let is_ws = path.starts_with("/websocket") || path == "/ws";
 
     let ua = header_str(req.headers(), "user-agent");
     let auth = header_str(req.headers(), "authorization");
@@ -143,6 +155,7 @@ async fn log_middleware(req: Request<Body>, next: Next) -> Response {
     let referer = header_str(req.headers(), "referer");
     let range = header_str(req.headers(), "range");
     let content_type = header_str(req.headers(), "content-type");
+    let upgrade = header_str(req.headers(), "upgrade");
 
     let client_ip = req
         .headers()
@@ -157,7 +170,7 @@ async fn log_middleware(req: Request<Body>, next: Next) -> Response {
         .unwrap_or_else(|| "-".into());
 
     let (parts, body) = req.into_parts();
-    let body_bytes = if is_video || is_image {
+    let body_bytes = if is_video || is_image || is_ws {
         bytes::Bytes::new()
     } else {
         axum::body::to_bytes(body, 8192)
@@ -203,6 +216,9 @@ async fn log_middleware(req: Request<Body>, next: Next) -> Response {
         }
         if let Some(r) = &referer {
             info!("│  referer     : {}", truncate(r, 80));
+        }
+        if let Some(u) = &upgrade {
+            info!("│  upgrade     : {}", u);
         }
         if let Some(b) = &body_preview {
             info!("│  body ({}B)  : {}", body_len, b);
@@ -257,6 +273,7 @@ fn truncate(s: &str, n: usize) -> String {
 
 fn reason(code: u16) -> &'static str {
     match code {
+        101 => "Switching Protocols",
         200 => "OK",
         204 => "No Content",
         206 => "Partial Content",
@@ -329,7 +346,6 @@ a{color:#7cc7ff}
 <a href="/trimcon">/trimcon</a><br><br>
 <a href="/v/api/v1/sys/version?lan=zh-CN">/v/api/v1/sys/version</a><br><br>
 <a href="/v/api/v1/sys/config?lan=zh-CN">/v/api/v1/sys/config</a><br><br>
-<a href="/v/api/v1/sys/init/status">/v/api/v1/sys/init/status</a><br><br>
 <a href="/v/api/v1/mediadb/list">/v/api/v1/mediadb/list</a><br><br>
 <a href="/v/api/v1/item/list?lib_guid=&type=Movie">/v/api/v1/item/list</a>
 </div></div><script>document.getElementById('srv').textContent=location.origin;</script>
