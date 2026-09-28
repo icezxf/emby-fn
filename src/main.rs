@@ -68,6 +68,7 @@ async fn main() {
         .route("/v/api/v2/user/loginByPassword", post(handlers::handle_login_v2))
         .route("/v/api/v1/login", post(handlers::handle_login))
         .route("/v/api/v1/logout", post(handlers::handle_logout))
+        .route("/v/api/v1/user/info", get(handlers::handle_user_info))
         .route("/v/api/v1/mediadb/list", get(handlers::handle_mediadb_list))
         .route("/v/api/v1/mediadb/sum", get(handlers::handle_mediadb_list))
         .route("/v/api/v1/item/list", get(handlers::handle_item_list))
