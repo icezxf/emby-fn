@@ -89,6 +89,7 @@ async fn main() {
         .route("/Videos/:guid/stream", get(handlers::handle_video_stream))
         .route("/Images/:guid", get(handlers::handle_image_proxy))
         .route("/", get(index))
+        .route("/api/v2/vals", get(sys::handle_cloud_vals))
         .fallback(not_found)
         .layer(middleware::from_fn(log_middleware))
         .with_state(state);
