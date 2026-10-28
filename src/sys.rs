@@ -107,3 +107,24 @@ pub async fn handle_trimcon() -> Json<serde_json::Value> {
         }
     }))
 }
+
+/// GET /api/v2/vals (模拟 cnf.fnnas.com)
+pub async fn handle_cloud_vals() -> Json<serde_json::Value> {
+    info!("☁️ [业务] 请求飞牛云端配置 (伪造)");
+    Json(serde_json::json!({
+        "code": 0,
+        "msg": "",
+        "data": {
+            "hasDiff": false,
+            "hash": "a7249a530a1cfa0d5b42b0891ba87066",
+            "kv": {
+                "android_async_release_player": "true",
+                "enableMoveCache": "1",
+                "fixMovBuffering": "false",
+                "cloud_urls": "{\"fnc_bind\":\"https://account.fnnas.com/login?bind=1\",\"fnc_visit\":\"https://fnos.net\",\"official\":\"https://fnnas.com\"}",
+                "fnc-vip": "{\"isShow\":false}",
+                "marqueeTips": "[]"
+            }
+        }
+    }))
+}
